@@ -3,6 +3,7 @@ defmodule SymphonyElixir.Codex.DynamicTool do
   Executes client-side tool calls requested by Codex app-server turns.
   """
 
+  alias SymphonyElixir.GitHub.Client, as: GitHubClient
   alias SymphonyElixir.Linear.Client
 
   @linear_graphql_tool "linear_graphql"
@@ -26,11 +27,44 @@ defmodule SymphonyElixir.Codex.DynamicTool do
     }
   }
 
+  @github_api_tool "github_api"
+  @github_api_description """
+  Execute a GitHub REST API request using Symphony's configured GitHub auth.
+  """
+  @github_api_input_schema %{
+    "type" => "object",
+    "additionalProperties" => false,
+    "required" => ["method", "path"],
+    "properties" => %{
+      "method" => %{
+        "type" => "string",
+        "description" => "HTTP method (GET, POST, PUT, PATCH, DELETE)."
+      },
+      "path" => %{
+        "type" => "string",
+        "description" => "GitHub REST path starting with /, e.g. /repos/owner/repo/issues."
+      },
+      "query" => %{
+        "type" => ["object", "null"],
+        "description" => "Optional query string parameters.",
+        "additionalProperties" => true
+      },
+      "body" => %{
+        "type" => ["object", "array", "null"],
+        "description" => "Optional JSON body for write requests.",
+        "additionalProperties" => true
+      }
+    }
+  }
+
   @spec execute(String.t() | nil, term(), keyword()) :: map()
   def execute(tool, arguments, opts \\ []) do
     case tool do
       @linear_graphql_tool ->
         execute_linear_graphql(arguments, opts)
+
+      @github_api_tool ->
+        execute_github_api(arguments, opts)
 
       other ->
         failure_response(%{
@@ -49,6 +83,11 @@ defmodule SymphonyElixir.Codex.DynamicTool do
         "name" => @linear_graphql_tool,
         "description" => @linear_graphql_description,
         "inputSchema" => @linear_graphql_input_schema
+      },
+      %{
+        "name" => @github_api_tool,
+        "description" => @github_api_description,
+        "inputSchema" => @github_api_input_schema
       }
     ]
   end
@@ -59,6 +98,18 @@ defmodule SymphonyElixir.Codex.DynamicTool do
     with {:ok, query, variables} <- normalize_linear_graphql_arguments(arguments),
          {:ok, response} <- linear_client.(query, variables, []) do
       graphql_response(response)
+    else
+      {:error, reason} ->
+        failure_response(tool_error_payload(reason))
+    end
+  end
+
+  defp execute_github_api(arguments, opts) do
+    github_client = Keyword.get(opts, :github_client, &GitHubClient.api_request/3)
+
+    with {:ok, method, path, query, body} <- normalize_github_api_arguments(arguments),
+         {:ok, response} <- github_client.(method, path, query: query, body: body) do
+      dynamic_tool_response(true, encode_payload(response))
     else
       {:error, reason} ->
         failure_response(tool_error_payload(reason))
@@ -89,6 +140,83 @@ defmodule SymphonyElixir.Codex.DynamicTool do
   end
 
   defp normalize_linear_graphql_arguments(_arguments), do: {:error, :invalid_arguments}
+
+  defp normalize_github_api_arguments(arguments) when is_map(arguments) do
+    with {:ok, method} <- normalize_github_api_method(arguments),
+         {:ok, path} <- normalize_github_api_path(arguments),
+         {:ok, query} <- normalize_github_api_query(arguments),
+         {:ok, body} <- normalize_github_api_body(arguments) do
+      {:ok, method, path, query, body}
+    end
+  end
+
+  defp normalize_github_api_arguments(_arguments), do: {:error, :invalid_github_api_arguments}
+
+  defp normalize_github_api_method(arguments) do
+    case Map.get(arguments, "method") || Map.get(arguments, :method) do
+      method when is_binary(method) ->
+        normalized_method =
+          method
+          |> String.trim()
+          |> String.downcase()
+
+        case normalized_method do
+          "get" -> {:ok, :get}
+          "post" -> {:ok, :post}
+          "put" -> {:ok, :put}
+          "patch" -> {:ok, :patch}
+          "delete" -> {:ok, :delete}
+          "" -> {:error, :missing_github_api_method}
+          _other -> {:error, :invalid_github_api_method}
+        end
+
+      nil ->
+        {:error, :missing_github_api_method}
+
+      _other ->
+        {:error, :invalid_github_api_method}
+    end
+  end
+
+  defp normalize_github_api_path(arguments) do
+    case Map.get(arguments, "path") || Map.get(arguments, :path) do
+      path when is_binary(path) ->
+        normalized_path = String.trim(path)
+
+        cond do
+          normalized_path == "" ->
+            {:error, :missing_github_api_path}
+
+          String.starts_with?(normalized_path, "/") ->
+            {:ok, normalized_path}
+
+          true ->
+            {:error, :invalid_github_api_path}
+        end
+
+      nil ->
+        {:error, :missing_github_api_path}
+
+      _other ->
+        {:error, :invalid_github_api_path}
+    end
+  end
+
+  defp normalize_github_api_query(arguments) do
+    case Map.get(arguments, "query") || Map.get(arguments, :query) do
+      nil -> {:ok, nil}
+      query when is_map(query) -> {:ok, query}
+      _other -> {:error, :invalid_github_api_query}
+    end
+  end
+
+  defp normalize_github_api_body(arguments) do
+    case Map.get(arguments, "body") || Map.get(arguments, :body) do
+      nil -> {:ok, nil}
+      body when is_map(body) or is_list(body) -> {:ok, body}
+      _other -> {:error, :invalid_github_api_body}
+    end
+  end
 
   defp normalize_query(arguments) do
     case Map.get(arguments, "query") || Map.get(arguments, :query) do
@@ -168,6 +296,89 @@ defmodule SymphonyElixir.Codex.DynamicTool do
     }
   end
 
+  defp tool_error_payload(:missing_github_api_method) do
+    %{
+      "error" => %{
+        "message" => "`github_api` requires a non-empty `method` string."
+      }
+    }
+  end
+
+  defp tool_error_payload(:invalid_github_api_method) do
+    %{
+      "error" => %{
+        "message" => "`github_api.method` must be one of GET, POST, PUT, PATCH, or DELETE."
+      }
+    }
+  end
+
+  defp tool_error_payload(:missing_github_api_path) do
+    %{
+      "error" => %{
+        "message" => "`github_api` requires a non-empty `path` that starts with `/`."
+      }
+    }
+  end
+
+  defp tool_error_payload(:invalid_github_api_path) do
+    %{
+      "error" => %{
+        "message" => "`github_api.path` must start with `/`, for example `/repos/owner/repo/issues`."
+      }
+    }
+  end
+
+  defp tool_error_payload(:invalid_github_api_query) do
+    %{
+      "error" => %{
+        "message" => "`github_api.query` must be a JSON object when provided."
+      }
+    }
+  end
+
+  defp tool_error_payload(:invalid_github_api_body) do
+    %{
+      "error" => %{
+        "message" => "`github_api.body` must be a JSON object or array when provided."
+      }
+    }
+  end
+
+  defp tool_error_payload(:invalid_github_api_arguments) do
+    %{
+      "error" => %{
+        "message" => "`github_api` expects an object with required `method` and `path`, plus optional `query` and `body`."
+      }
+    }
+  end
+
+  defp tool_error_payload(:missing_github_api_token) do
+    %{
+      "error" => %{
+        "message" => "Symphony is missing GitHub auth. Set `tracker.api_key` in `WORKFLOW.md` or export `GITHUB_TOKEN`."
+      }
+    }
+  end
+
+  defp tool_error_payload({:github_api_status, status, body}) do
+    %{
+      "error" => %{
+        "message" => "GitHub REST API request failed with HTTP #{status}.",
+        "status" => status,
+        "body" => body
+      }
+    }
+  end
+
+  defp tool_error_payload({:github_api_request, reason}) do
+    %{
+      "error" => %{
+        "message" => "GitHub REST API request failed before receiving a successful response.",
+        "reason" => inspect(reason)
+      }
+    }
+  end
+
   defp tool_error_payload(:missing_linear_api_token) do
     %{
       "error" => %{
@@ -197,7 +408,7 @@ defmodule SymphonyElixir.Codex.DynamicTool do
   defp tool_error_payload(reason) do
     %{
       "error" => %{
-        "message" => "Linear GraphQL tool execution failed.",
+        "message" => "Dynamic tool execution failed.",
         "reason" => inspect(reason)
       }
     }

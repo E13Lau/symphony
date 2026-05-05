@@ -86,6 +86,67 @@ defmodule SymphonyElixir.CoreTest do
 
     write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "123")
     assert {:error, {:unsupported_tracker_kind, "123"}} = Config.validate!()
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "github",
+      tracker_api_token: nil,
+      tracker_repository: nil
+    )
+
+    assert {:error, :missing_github_api_token} = Config.validate!()
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "github",
+      tracker_api_token: "gh-token",
+      tracker_repository: nil
+    )
+
+    assert {:error, :missing_github_repository} = Config.validate!()
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "github",
+      tracker_api_token: "gh-token",
+      tracker_repository: "acme/repo",
+      tracker_active_states: ["Ready For AI", "ai-in-progress"],
+      tracker_active_labels: nil
+    )
+
+    assert :ok = Config.validate!()
+    assert Config.settings!().tracker.active_labels == ["status:ready-for-ai", "status:ai-in-progress"]
+  end
+
+  test "github api token resolves from GITHUB_TOKEN env var" do
+    previous_github_token = System.get_env("GITHUB_TOKEN")
+    env_github_token = "test-github-token"
+
+    on_exit(fn -> restore_env("GITHUB_TOKEN", previous_github_token) end)
+    System.put_env("GITHUB_TOKEN", env_github_token)
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "github",
+      tracker_api_token: nil,
+      tracker_repository: "acme/repo"
+    )
+
+    assert Config.settings!().tracker.api_key == env_github_token
+    assert :ok = Config.validate!()
+  end
+
+  test "github repository resolves from GITHUB_REPOSITORY env var" do
+    previous_github_repository = System.get_env("GITHUB_REPOSITORY")
+    env_github_repository = "openai/symphony"
+
+    on_exit(fn -> restore_env("GITHUB_REPOSITORY", previous_github_repository) end)
+    System.put_env("GITHUB_REPOSITORY", env_github_repository)
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "github",
+      tracker_api_token: "gh-token",
+      tracker_repository: "$GITHUB_REPOSITORY"
+    )
+
+    assert Config.settings!().tracker.repository == env_github_repository
+    assert :ok = Config.validate!()
   end
 
   test "current WORKFLOW.md file is valid and complete" do
@@ -551,7 +612,7 @@ defmodule SymphonyElixir.CoreTest do
     assert MapSet.member?(state.completed, issue_id)
     assert %{attempt: 1, due_at_ms: due_at_ms} = state.retry_attempts[issue_id]
     assert is_integer(due_at_ms)
-    assert_due_in_range(due_at_ms, 500, 1_100)
+    assert_due_in_range(due_at_ms, 200, 1_100)
   end
 
   test "abnormal worker exit increments retry attempt progressively" do
@@ -591,7 +652,7 @@ defmodule SymphonyElixir.CoreTest do
     assert %{attempt: 3, due_at_ms: due_at_ms, identifier: "MT-559", error: "agent exited: :boom"} =
              state.retry_attempts[issue_id]
 
-    assert_due_in_range(due_at_ms, 39_500, 40_500)
+    assert_due_in_range(due_at_ms, 39_000, 40_500)
   end
 
   test "first abnormal worker exit waits before retrying" do

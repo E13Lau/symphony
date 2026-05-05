@@ -3,23 +3,58 @@ defmodule SymphonyElixir.Codex.DynamicToolTest do
 
   alias SymphonyElixir.Codex.DynamicTool
 
-  test "tool_specs advertises the linear_graphql input contract" do
-    assert [
-             %{
-               "description" => description,
-               "inputSchema" => %{
-                 "properties" => %{
-                   "query" => _,
-                   "variables" => _
-                 },
-                 "required" => ["query"],
-                 "type" => "object"
-               },
-               "name" => "linear_graphql"
-             }
-           ] = DynamicTool.tool_specs()
+  test "tool_specs advertises the linear_graphql and github_api input contracts" do
+    specs = DynamicTool.tool_specs()
 
-    assert description =~ "Linear"
+    assert linear_spec = Enum.find(specs, &(&1["name"] == "linear_graphql"))
+
+    assert linear_spec["inputSchema"] == %{
+             "additionalProperties" => false,
+             "properties" => %{
+               "query" => %{
+                 "description" => "GraphQL query or mutation document to execute against Linear.",
+                 "type" => "string"
+               },
+               "variables" => %{
+                 "additionalProperties" => true,
+                 "description" => "Optional GraphQL variables object.",
+                 "type" => ["object", "null"]
+               }
+             },
+             "required" => ["query"],
+             "type" => "object"
+           }
+
+    assert linear_spec["description"] =~ "Linear"
+
+    assert github_spec = Enum.find(specs, &(&1["name"] == "github_api"))
+    assert github_spec["description"] =~ "GitHub REST"
+
+    assert github_spec["inputSchema"] == %{
+             "additionalProperties" => false,
+             "properties" => %{
+               "body" => %{
+                 "additionalProperties" => true,
+                 "description" => "Optional JSON body for write requests.",
+                 "type" => ["object", "array", "null"]
+               },
+               "method" => %{
+                 "description" => "HTTP method (GET, POST, PUT, PATCH, DELETE).",
+                 "type" => "string"
+               },
+               "path" => %{
+                 "description" => "GitHub REST path starting with /, e.g. /repos/owner/repo/issues.",
+                 "type" => "string"
+               },
+               "query" => %{
+                 "additionalProperties" => true,
+                 "description" => "Optional query string parameters.",
+                 "type" => ["object", "null"]
+               }
+             },
+             "required" => ["method", "path"],
+             "type" => "object"
+           }
   end
 
   test "unsupported tools return a failure payload with the supported tool list" do
@@ -30,7 +65,7 @@ defmodule SymphonyElixir.Codex.DynamicToolTest do
     assert Jason.decode!(response["output"]) == %{
              "error" => %{
                "message" => ~s(Unsupported dynamic tool: "not_a_real_tool".),
-               "supportedTools" => ["linear_graphql"]
+               "supportedTools" => ["linear_graphql", "github_api"]
              }
            }
 
@@ -290,8 +325,144 @@ defmodule SymphonyElixir.Codex.DynamicToolTest do
 
     assert Jason.decode!(response["output"]) == %{
              "error" => %{
-               "message" => "Linear GraphQL tool execution failed.",
+               "message" => "Dynamic tool execution failed.",
                "reason" => ":boom"
+             }
+           }
+  end
+
+  test "github_api executes valid REST requests and returns response payload" do
+    test_pid = self()
+
+    response =
+      DynamicTool.execute(
+        "github_api",
+        %{
+          "method" => "GET",
+          "path" => "/repos/openai/symphony/issues",
+          "query" => %{"state" => "open", "labels" => "status:ready-for-ai"}
+        },
+        github_client: fn method, path, opts ->
+          send(test_pid, {:github_client_called, method, path, opts})
+          {:ok, [%{"id" => 1}]}
+        end
+      )
+
+    assert_received {:github_client_called, :get, "/repos/openai/symphony/issues",
+                     [query: %{"state" => "open", "labels" => "status:ready-for-ai"}, body: nil]}
+
+    assert response["success"] == true
+    assert Jason.decode!(response["output"]) == [%{"id" => 1}]
+  end
+
+  test "github_api validates required arguments before calling GitHub" do
+    missing_method = DynamicTool.execute("github_api", %{"path" => "/repos/openai/symphony/issues"})
+
+    assert missing_method["success"] == false
+
+    assert Jason.decode!(missing_method["output"]) == %{
+             "error" => %{
+               "message" => "`github_api` requires a non-empty `method` string."
+             }
+           }
+
+    missing_path = DynamicTool.execute("github_api", %{"method" => "GET"})
+
+    assert missing_path["success"] == false
+
+    assert Jason.decode!(missing_path["output"]) == %{
+             "error" => %{
+               "message" => "`github_api` requires a non-empty `path` that starts with `/`."
+             }
+           }
+  end
+
+  test "github_api validates method, path, query, and body types" do
+    invalid_method =
+      DynamicTool.execute("github_api", %{"method" => "TRACE", "path" => "/repos/openai/symphony/issues"})
+
+    assert Jason.decode!(invalid_method["output"]) == %{
+             "error" => %{
+               "message" => "`github_api.method` must be one of GET, POST, PUT, PATCH, or DELETE."
+             }
+           }
+
+    invalid_path =
+      DynamicTool.execute("github_api", %{"method" => "GET", "path" => "repos/openai/symphony/issues"})
+
+    assert Jason.decode!(invalid_path["output"]) == %{
+             "error" => %{
+               "message" => "`github_api.path` must start with `/`, for example `/repos/owner/repo/issues`."
+             }
+           }
+
+    invalid_query =
+      DynamicTool.execute("github_api", %{
+        "method" => "GET",
+        "path" => "/repos/openai/symphony/issues",
+        "query" => ["bad"]
+      })
+
+    assert Jason.decode!(invalid_query["output"]) == %{
+             "error" => %{
+               "message" => "`github_api.query` must be a JSON object when provided."
+             }
+           }
+
+    invalid_body =
+      DynamicTool.execute("github_api", %{
+        "method" => "POST",
+        "path" => "/repos/openai/symphony/issues",
+        "body" => "bad"
+      })
+
+    assert Jason.decode!(invalid_body["output"]) == %{
+             "error" => %{
+               "message" => "`github_api.body` must be a JSON object or array when provided."
+             }
+           }
+  end
+
+  test "github_api formats transport and auth failures" do
+    missing_token =
+      DynamicTool.execute(
+        "github_api",
+        %{"method" => "GET", "path" => "/repos/openai/symphony/issues"},
+        github_client: fn _method, _path, _opts -> {:error, :missing_github_api_token} end
+      )
+
+    assert Jason.decode!(missing_token["output"]) == %{
+             "error" => %{
+               "message" => "Symphony is missing GitHub auth. Set `tracker.api_key` in `WORKFLOW.md` or export `GITHUB_TOKEN`."
+             }
+           }
+
+    status_error =
+      DynamicTool.execute(
+        "github_api",
+        %{"method" => "GET", "path" => "/repos/openai/symphony/issues"},
+        github_client: fn _method, _path, _opts -> {:error, {:github_api_status, 403, %{"message" => "Forbidden"}}} end
+      )
+
+    assert Jason.decode!(status_error["output"]) == %{
+             "error" => %{
+               "message" => "GitHub REST API request failed with HTTP 403.",
+               "status" => 403,
+               "body" => %{"message" => "Forbidden"}
+             }
+           }
+
+    request_error =
+      DynamicTool.execute(
+        "github_api",
+        %{"method" => "GET", "path" => "/repos/openai/symphony/issues"},
+        github_client: fn _method, _path, _opts -> {:error, {:github_api_request, :timeout}} end
+      )
+
+    assert Jason.decode!(request_error["output"]) == %{
+             "error" => %{
+               "message" => "GitHub REST API request failed before receiving a successful response.",
+               "reason" => ":timeout"
              }
            }
   end

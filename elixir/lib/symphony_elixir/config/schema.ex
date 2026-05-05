@@ -49,9 +49,11 @@ defmodule SymphonyElixir.Config.Schema do
       field(:endpoint, :string, default: "https://api.linear.app/graphql")
       field(:api_key, :string)
       field(:project_slug, :string)
+      field(:repository, :string)
       field(:assignee, :string)
       field(:active_states, {:array, :string}, default: ["Todo", "In Progress"])
       field(:terminal_states, {:array, :string}, default: ["Closed", "Cancelled", "Canceled", "Duplicate", "Done"])
+      field(:active_labels, {:array, :string}, default: [])
     end
 
     @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
@@ -59,7 +61,17 @@ defmodule SymphonyElixir.Config.Schema do
       schema
       |> cast(
         attrs,
-        [:kind, :endpoint, :api_key, :project_slug, :assignee, :active_states, :terminal_states],
+        [
+          :kind,
+          :endpoint,
+          :api_key,
+          :project_slug,
+          :repository,
+          :assignee,
+          :active_states,
+          :terminal_states,
+          :active_labels
+        ],
         empty_values: []
       )
     end
@@ -366,11 +378,7 @@ defmodule SymphonyElixir.Config.Schema do
   end
 
   defp finalize_settings(settings) do
-    tracker = %{
-      settings.tracker
-      | api_key: resolve_secret_setting(settings.tracker.api_key, System.get_env("LINEAR_API_KEY")),
-        assignee: resolve_secret_setting(settings.tracker.assignee, System.get_env("LINEAR_ASSIGNEE"))
-    }
+    tracker = finalize_tracker_settings(settings.tracker)
 
     workspace = %{
       settings.workspace
@@ -384,6 +392,90 @@ defmodule SymphonyElixir.Config.Schema do
     }
 
     %{settings | tracker: tracker, workspace: workspace, codex: codex}
+  end
+
+  defp finalize_tracker_settings(tracker) do
+    api_key_fallback =
+      case tracker.kind do
+        "github" -> System.get_env("GITHUB_TOKEN")
+        _ -> System.get_env("LINEAR_API_KEY")
+      end
+
+    assignee_fallback =
+      case tracker.kind do
+        "linear" -> System.get_env("LINEAR_ASSIGNEE")
+        _ -> nil
+      end
+
+    %{
+      tracker
+      | api_key: resolve_secret_setting(tracker.api_key, api_key_fallback),
+        repository: resolve_repository_setting(tracker),
+        assignee: resolve_secret_setting(tracker.assignee, assignee_fallback),
+        active_labels: resolve_active_labels(tracker)
+    }
+  end
+
+  defp resolve_repository_setting(%{kind: "github", repository: repository}) when is_binary(repository) do
+    repository
+    |> resolve_env_value(System.get_env("GITHUB_REPOSITORY"))
+    |> normalize_repository_value()
+  end
+
+  defp resolve_repository_setting(%{kind: "github"}) do
+    normalize_repository_value(System.get_env("GITHUB_REPOSITORY"))
+  end
+
+  defp resolve_repository_setting(%{repository: repository}) do
+    normalize_repository_value(repository)
+  end
+
+  defp normalize_repository_value(value) when is_binary(value) do
+    case String.trim(value) do
+      "" -> nil
+      normalized -> normalized
+    end
+  end
+
+  defp normalize_repository_value(_value), do: nil
+
+  defp resolve_active_labels(%{kind: "github", active_labels: labels, active_states: active_states}) do
+    labels
+    |> normalize_string_list()
+    |> case do
+      [] ->
+        active_states
+        |> normalize_string_list()
+        |> Enum.map(&state_name_to_status_label/1)
+        |> Enum.reject(&is_nil/1)
+        |> Enum.uniq()
+
+      normalized_labels ->
+        normalized_labels
+    end
+  end
+
+  defp resolve_active_labels(%{active_labels: labels}), do: normalize_string_list(labels)
+
+  defp normalize_string_list(values) when is_list(values) do
+    values
+    |> Enum.map(&to_string/1)
+    |> Enum.map(&String.trim/1)
+    |> Enum.reject(&(&1 == ""))
+    |> Enum.uniq()
+  end
+
+  defp normalize_string_list(_values), do: []
+
+  defp state_name_to_status_label(state_name) do
+    state_name
+    |> normalize_issue_state()
+    |> String.replace(~r/[^a-z0-9]+/, "-")
+    |> String.trim("-")
+    |> case do
+      "" -> nil
+      normalized -> "status:" <> normalized
+    end
   end
 
   defp normalize_keys(value) when is_map(value) do
