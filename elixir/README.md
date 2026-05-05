@@ -72,6 +72,17 @@ mise exec -- mix build
 mise exec -- ./bin/symphony ./WORKFLOW.md
 ```
 
+For GitHub Issues, the one-command local runner accepts either `owner/repo` or a GitHub repository
+URL:
+
+```bash
+cd symphony
+./run_github.sh https://github.com/your-org/your-repo.git
+```
+
+Use `./run_github.sh owner/repo --local-agent` when you intentionally want Codex to run with local
+full access instead of the workspace sandbox.
+
 ## Configuration
 
 Pass a custom workflow file path to `./bin/symphony` when starting the service:
@@ -153,7 +164,7 @@ hooks:
   after_create: |
     git clone --depth 1 "$SOURCE_REPO_URL" .
 codex:
-  command: "$CODEX_BIN --config 'model=\"gpt-5.5\"' app-server"
+  command: "$CODEX_BIN app-server"
 ```
 
 - If `WORKFLOW.md` is missing or has invalid YAML at startup, Symphony does not boot.

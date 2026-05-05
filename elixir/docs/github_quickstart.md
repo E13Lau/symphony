@@ -2,7 +2,41 @@
 
 这是一份最小端到端清单，用于以 GitHub 作为任务跟踪器启动 Symphony，并完成一次 label 流转演练。
 
-## 1. 导出环境变量
+## 1. 一键启动
+
+在终端 A 中执行以下命令（先替换仓库地址）。脚本会优先使用 `GITHUB_TOKEN`，没有设置时会读取已登录的 `gh` CLI token：
+
+```bash
+cd /path/to/symphony
+./run_github.sh https://github.com/owner/repo.git
+```
+
+脚本会自动：
+
+- 解析 `owner/repo` 并导出 `GITHUB_REPOSITORY`。
+- 设置 `GH_TOKEN`、`SYMPHONY_SOURCE_REPO` 和默认工作区根目录。
+- 检查 Codex CLI 是否已登录。
+- 创建 GitHub workflow 需要的 labels。
+- 如果本机没有 `mise` 或 `mix`，自动通过 Homebrew 安装 `mise`。
+- 执行 `mise trust`、`mise install`、`mix setup`、`mix build`。
+- 使用 `WORKFLOW.github.md` 启动 Symphony，并在 `http://127.0.0.1:4000` 开启仪表盘。
+
+常用参数：
+
+```bash
+./run_github.sh owner/repo --port 4001
+./run_github.sh owner/repo --local-agent
+./run_github.sh owner/repo --workspace-root "$HOME/code/my-symphony-workspaces"
+./run_github.sh owner/repo --skip-labels --skip-build
+```
+
+`--local-agent` 会使用 `WORKFLOW.github.local.md`，让 Codex agent 以本机完整访问权限运行，而不是 workspace sandbox。只建议在你信任 issue 内容和目标仓库时使用。
+
+## 2. 手动启动
+
+如果你想分步执行，可以继续使用下面的手动流程。
+
+### 2.1 导出环境变量
 
 在终端 A 中执行以下命令（先替换占位符）：
 
@@ -25,7 +59,7 @@ gh auth status
 gh repo view "$GITHUB_REPOSITORY"
 ```
 
-## 2. 启动 Symphony
+### 2.2 启动 Symphony
 
 仍在终端 A 中执行：
 
